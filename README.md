@@ -38,7 +38,7 @@ An advanced, high-performance Discord Music Bot built with **Python**, **discord
 | **Row 0** | `⏹️ Stop` | Menghentikan musik, mengosongkan antrean, dan keluar dari VC |
 | **Row 1** | `🔀 Shuffle` | Mengacak urutan antrean trek lagu |
 | **Row 1** | `🔁 Repeat` | Siklus mode loop: **Off** ➔ **Track** ➔ **Queue** ➔ **Off** |
-| **Row 1** | `📻 Autoplay` | Menyalakan/mematikan rekomendasi lagu otomatis saat antrean habis |
+| **Row 1** | `📻 Autoplay` | Menyalakan/mematikan rekomendasi lagu otomatis saat antrean habis (MT) |
 | **Row 1** | `📜 Queue` | Menampilkan pratinjau daftar lagu antrean (privat / ephemeral) |
 
 ---
