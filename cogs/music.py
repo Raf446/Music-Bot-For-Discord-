@@ -28,11 +28,37 @@ def fmt_time(ms: int) -> str:
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
-def progress_bar(pos: int, length: int, size: int = 15) -> str:
+def fmt_clock(ms: int) -> str:
+    """Format MM:SS (selalu 2 digit), mis. 00:53 / 03:13."""
+    m, s = divmod(int(ms // 1000), 60)
+    return f"{m:02d}:{s:02d}"
+
+
+def progress_bar(pos: int, length: int, size: int = 16) -> str:
+    """Contoh: ▬▬▬▬🔘▬▬▬▬▬▬▬▬▬▬▬▬ (posisi dihitung dari pos/length)."""
     if length <= 0:
         return "🔴 LIVE"
     filled = min(size - 1, int(size * pos / length))
     return "▬" * filled + "🔘" + "▬" * (size - filled - 1)
+
+
+QUEUE_PREVIEW = 10
+LOOP_LABELS = {
+    wavelink.QueueMode.normal: "Off",
+    wavelink.QueueMode.loop: "Track",
+    wavelink.QueueMode.loop_all: "Queue",
+}
+LOOP_CYCLE = {  # Off -> Track -> Queue -> Off
+    wavelink.QueueMode.normal: wavelink.QueueMode.loop,
+    wavelink.QueueMode.loop: wavelink.QueueMode.loop_all,
+    wavelink.QueueMode.loop_all: wavelink.QueueMode.normal,
+}
+SOURCE_LABELS = {
+    "youtube": "YouTube",
+    "youtubemusic": "YouTube Music",
+    "soundcloud": "SoundCloud",
+    "spotify": "Spotify via SoundCloud/YouTube",
+}
 
 
 def error_embed(msg: str) -> discord.Embed:
@@ -47,26 +73,41 @@ def build_now_playing(player: wavelink.Player) -> discord.Embed:
     track = player.current
     if track is None:
         return info_embed("Tidak ada lagu yang sedang diputar.")
-    state = "⏸️ Dijeda" if player.paused else "▶️ Sedang diputar"
+
+    # --- Author (status dinamis + sumber)
+    source = SOURCE_LABELS.get((track.source or "").lower(), (track.source or "Unknown").title())
+    status = "🟡 Dijeda" if player.paused else "🟢 Sedang Diputar"
     embed = discord.Embed(
-        title=track.title,
-        url=track.uri,
+        title=track.title[:256],
+        url=track.uri or None,
         color=EMBED_COLOR,
-        description=f"**{track.author}**\n\n"
-                    f"`{fmt_time(player.position)}` {progress_bar(player.position, track.length)} "
-                    f"`{'LIVE' if track.is_stream else fmt_time(track.length)}`",
     )
-    embed.set_author(name=state)
+    embed.set_author(name=f"{status} | 🟢 {source}")
+
+    # --- Description: artis + progress bar
+    pos = min(player.position, track.length) if track.length else player.position
+    total = "LIVE" if track.is_stream else fmt_clock(track.length)
+    embed.description = (
+        f"**{track.author}**\n"
+        f"`{fmt_clock(pos)}` {progress_bar(pos, track.length)} `{total}`"
+    )
+
+    # --- 3 inline fields
+    embed.add_field(name="📑 Antrean", value=f"`{len(player.queue)} Lagu`")
+    embed.add_field(name="🔁 Mode", value=f"`{LOOP_LABELS[player.queue.mode]}`")
+    embed.add_field(
+        name="📻 Autoplay",
+        value=f"`{'Aktif' if player.autoplay == wavelink.AutoPlayMode.enabled else 'Nonaktif'}`",
+    )
+
     if track.artwork:
         embed.set_thumbnail(url=track.artwork)
-    mode = {
-        wavelink.QueueMode.normal: "Off",
-        wavelink.QueueMode.loop: "🔂 Track",
-        wavelink.QueueMode.loop_all: "🔁 Queue",
-    }[player.queue.mode]
-    embed.add_field(name="Volume", value=f"{player.volume}%")
-    embed.add_field(name="Loop", value=mode)
-    embed.add_field(name="Antrean", value=f"{len(player.queue)} lagu")
+
+    # --- Footer: peminta lagu + avatar
+    requester_id = getattr(track.extras, "requester", None)
+    member = player.guild.get_member(requester_id) if requester_id else None
+    footer = f"Diminta oleh @{member.name if member else 'unknown'} • Wavelink v3 • Lavalink v4"
+    embed.set_footer(text=footer, icon_url=member.display_avatar.url if member else None)
     return embed
 
 
@@ -92,31 +133,129 @@ async def check_user_in_vc(interaction: discord.Interaction, player: wavelink.Pl
 
 # ------------------------------------------------------------------- views
 class NowPlayingView(discord.ui.View):
-    def __init__(self) -> None:
+    """Kontrol Now Playing: Row 0 = playback, Row 1 = mode & antrean.
+
+    Setiap tombol memanggil update_ui sehingga embed dan label tombol langsung diperbarui.
+    """
+
+    def __init__(self, player: wavelink.Player | None = None) -> None:
         super().__init__(timeout=None)
+        if player is not None:
+            self.sync(player)
+
+    # ---- sinkronisasi tampilan tombol dengan state player
+    def sync(self, player: wavelink.Player) -> None:
+        if player.paused:
+            self.btn_pause.label, self.btn_pause.emoji = "Resume", "▶️"
+        else:
+            self.btn_pause.label, self.btn_pause.emoji = "Pause", "⏸️"
+        self.btn_repeat.label = f"Repeat: {LOOP_LABELS[player.queue.mode]}"
+        autoplay_on = player.autoplay == wavelink.AutoPlayMode.enabled
+        self.btn_autoplay.style = discord.ButtonStyle.success if autoplay_on else discord.ButtonStyle.secondary
+        self.btn_autoplay.label = f"Autoplay: {'On' if autoplay_on else 'Off'}"
+        self.btn_queue.label = f"Queue ({len(player.queue)})"
+
+    async def update_ui(self, interaction: discord.Interaction, player: wavelink.Player) -> None:
+        """Perbarui embed + view pada pesan tempat tombol ditekan."""
+        self.sync(player)
+        await interaction.response.edit_message(embed=build_now_playing(player), view=self)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return await check_user_in_vc(interaction, get_player(interaction))
 
-    @discord.ui.button(emoji="⏯️", label="Play/Pause", style=discord.ButtonStyle.primary, custom_id="music_btn_toggle")
-    async def toggle(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item) -> None:
+        log.exception("Error pada tombol %s", item, exc_info=error)
+        embed = error_embed(f"Terjadi kesalahan: `{error}`")
+        if interaction.response.is_done():
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        else:
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # ------------------------------------------------ Row 0: playback
+    @discord.ui.button(emoji="⏮️", label="Prev", style=discord.ButtonStyle.secondary,
+                       custom_id="music_btn_prev", row=0)
+    async def btn_prev(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        player = get_player(interaction)
+        prev = getattr(player, "prev_track", None)
+        # Jika lagu sudah berjalan >5 detik atau tidak ada riwayat -> ulang dari awal
+        if player.current and (player.position > 5000 or prev is None):
+            await player.seek(0)
+        elif prev is not None:
+            if player.current:  # lagu sekarang dikembalikan ke depan antrean
+                player.queue.put_at(0, player.current)
+            await player.play(prev)
+        await self.update_ui(interaction, player)
+
+    @discord.ui.button(emoji="⏸️", label="Pause", style=discord.ButtonStyle.primary,
+                       custom_id="music_btn_pause", row=0)
+    async def btn_pause(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         player = get_player(interaction)
         await player.pause(not player.paused)
-        await interaction.response.edit_message(embed=build_now_playing(player), view=self)
+        await self.update_ui(interaction, player)
 
-    @discord.ui.button(emoji="⏭️", label="Skip", style=discord.ButtonStyle.secondary, custom_id="music_btn_skip")
-    async def skip(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+    @discord.ui.button(emoji="⏭️", label="Skip", style=discord.ButtonStyle.secondary,
+                       custom_id="music_btn_skip", row=0)
+    async def btn_skip(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         player = get_player(interaction)
-        title = player.current.title if player.current else "lagu"
         await player.skip(force=True)
-        await interaction.response.send_message(embed=info_embed(f"⏭️ Melewati **{title}**"), ephemeral=False)
+        await self.update_ui(interaction, player)
 
-    @discord.ui.button(emoji="⏹️", label="Stop", style=discord.ButtonStyle.danger, custom_id="music_btn_stop")
-    async def stop_btn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+    @discord.ui.button(emoji="⏹️", label="Stop", style=discord.ButtonStyle.danger,
+                       custom_id="music_btn_stop", row=0)
+    async def btn_stop(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         player = get_player(interaction)
         player.queue.clear()
+        cog = interaction.client.get_cog("Music")
+        if cog is not None:
+            cog.np_messages.pop(interaction.guild.id, None)
         await player.disconnect()
-        await interaction.response.edit_message(content="⏹️ Dihentikan.", embed=None, view=None)
+        await interaction.response.edit_message(content="⏹️ Pemutaran dihentikan dan antrean dikosongkan.",
+                                                embed=None, view=None)
+
+    # ------------------------------------------------ Row 1: mode & antrean
+    @discord.ui.button(emoji="🔀", label="Shuffle", style=discord.ButtonStyle.secondary,
+                       custom_id="music_btn_shuffle", row=1)
+    async def btn_shuffle(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        player = get_player(interaction)
+        count = len(player.queue)
+        if count > 1:
+            player.queue.shuffle()
+            confirm = info_embed(f"🔀 Antrean diacak (**{count}** lagu).")
+        else:
+            confirm = error_embed("Antrean terlalu pendek untuk diacak.")
+        await self.update_ui(interaction, player)
+        await interaction.followup.send(embed=confirm, ephemeral=True)
+
+    @discord.ui.button(emoji="🔁", label="Repeat: Off", style=discord.ButtonStyle.secondary,
+                       custom_id="music_btn_repeat", row=1)
+    async def btn_repeat(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        player = get_player(interaction)
+        player.queue.mode = LOOP_CYCLE[player.queue.mode]  # Off -> Track -> Queue -> Off
+        await self.update_ui(interaction, player)
+
+    @discord.ui.button(emoji="📻", label="Autoplay: Off", style=discord.ButtonStyle.secondary,
+                       custom_id="music_btn_autoplay", row=1)
+    async def btn_autoplay(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        player = get_player(interaction)
+        if player.autoplay == wavelink.AutoPlayMode.enabled:
+            player.autoplay = wavelink.AutoPlayMode.partial
+        else:
+            player.autoplay = wavelink.AutoPlayMode.enabled
+        await self.update_ui(interaction, player)
+
+    @discord.ui.button(emoji="📜", label="Queue (0)", style=discord.ButtonStyle.secondary,
+                       custom_id="music_btn_queue", row=1)
+    async def btn_queue(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        player = get_player(interaction)
+        upcoming = list(player.queue)[:QUEUE_PREVIEW]
+        lines = [f"`{i}.` [{t.title[:55]}]({t.uri}) — `{fmt_time(t.length)}`"
+                 for i, t in enumerate(upcoming, start=1)]
+        embed = discord.Embed(title="📜 Antrean Teratas", color=EMBED_COLOR,
+                              description="\n".join(lines) or "*Antrean kosong*")
+        if len(player.queue) > QUEUE_PREVIEW:
+            embed.set_footer(text=f"...dan {len(player.queue) - QUEUE_PREVIEW} lagu lainnya • gunakan /queue")
+        await self.update_ui(interaction, player)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 class QueueView(discord.ui.View):
@@ -203,9 +342,16 @@ class Music(commands.Cog):
         if channel:
             try:
                 self.np_messages[player.guild.id] = await channel.send(
-                    embed=build_now_playing(player), view=NowPlayingView())
+                    embed=build_now_playing(player), view=NowPlayingView(player))
             except discord.HTTPException:
                 log.warning("Tidak bisa mengirim pesan Now Playing")
+
+    @commands.Cog.listener()
+    async def on_wavelink_track_end(self, payload: wavelink.TrackEndEventPayload) -> None:
+        """Simpan lagu yang baru selesai agar tombol Prev bisa memutarnya lagi."""
+        player = payload.player
+        if player is not None and payload.track is not None:
+            player.prev_track = payload.track  # type: ignore[attr-defined]
 
     @commands.Cog.listener()
     async def on_wavelink_track_exception(self, payload: wavelink.TrackExceptionEventPayload) -> None:
@@ -364,7 +510,6 @@ class Music(commands.Cog):
             if not spotify_queries:
                 return await interaction.followup.send(embed=error_embed("Gagal membaca link Spotify."))
 
-            # Segera ambil lagu pertama agar langsung bunyi tanpa nunggu playlist selesai di-load
             first_query = spotify_queries[0]
             try:
                 res_first = await wavelink.Playable.search(first_query, source=wavelink.TrackSource.SoundCloud)
@@ -386,11 +531,9 @@ class Music(commands.Cog):
                 return await interaction.followup.send(embed=info_embed(
                     f"✅ Ditambahkan: **[{first_track.title}]({first_track.uri})** — `{fmt_time(first_track.length)}`"))
 
-            # Kirim embed progress
             msg = await interaction.followup.send(embed=info_embed(
                 f"🎶 Memutar **[{first_track.title}]({first_track.uri})**, memasukkan {len(spotify_queries)-1} lagu playlist ke antrean..."))
 
-            # Masukkan sisa lagu di background
             async def load_remaining():
                 count = 1
                 for q in spotify_queries[1:]:
@@ -512,7 +655,7 @@ class Music(commands.Cog):
         player = get_player(interaction)
         if player is None or not player.current:
             return await interaction.response.send_message(embed=error_embed("Tidak ada lagu diputar."), ephemeral=True)
-        await interaction.response.send_message(embed=build_now_playing(player), view=NowPlayingView())
+        await interaction.response.send_message(embed=build_now_playing(player), view=NowPlayingView(player))
 
     @app_commands.command(name="loop", description="Atur mode loop")
     @app_commands.describe(mode="Mode loop")
