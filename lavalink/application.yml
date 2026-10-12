@@ -26,8 +26,9 @@ plugins:
       deezer: false
       yandexmusic: false
     spotify:
-      clientId: "2abb1d0b1e1740968764a99f727a7435"
-      clientSecret: "d6775d397d694a669e1a6eda2fe917ef"
+     spotify:
+      clientId: "${SPOTIFY_CLIENT_ID:}"
+      clientSecret: "${SPOTIFY_CLIENT_SECRET:}"
       spDc: "AQBMS736xAK-_FU77QUPaqylrpOTZyQXHqGGiVQfF0dAwEdUKIGpPlMRKhazYm9mlrFUnrVNVVkv8rvWyAGuIfyHDLHOx6yHtT8gh4P35JX1vXPLjauBXgtE_mI61DVFv-8yBgAamKYI0z0Fud5xTB0eKypMt9YIKrncj0_oqd23lGZVjRnPFdCdX1Rh2rm-TSgeHFSFNVN23_pGDw"
       countryCode: "ID"
       playlistLoadLimit: 50
