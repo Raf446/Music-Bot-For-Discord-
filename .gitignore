@@ -4,5 +4,6 @@ __pycache__/
 .venv/
 venv/
 Lavalink.jar
-application.yml
 logs/
+lavalink/cookies.txt
+lavalink/plugins/

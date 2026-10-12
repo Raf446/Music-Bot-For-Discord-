@@ -57,8 +57,15 @@ SOURCE_LABELS = {
     "youtube": "YouTube",
     "youtubemusic": "YouTube Music",
     "soundcloud": "SoundCloud",
-    "spotify": "Spotify via SoundCloud/YouTube",
+    "spotify": "Spotify via Audio Resolver",
 }
+
+# Daftar filter untuk menyortir hasil non-orisinil
+JUNK_KEYWORDS = (
+    "remix", "cover", "slowed", "reverb", "sped up", "speed up",
+    "bass boosted", "karaoke", "instrumental", "tribute", "live session",
+    "live version", "parody", "acoustic cover"
+)
 
 
 def error_embed(msg: str) -> discord.Embed:
@@ -74,7 +81,6 @@ def build_now_playing(player: wavelink.Player) -> discord.Embed:
     if track is None:
         return info_embed("Tidak ada lagu yang sedang diputar.")
 
-    # --- Author (status dinamis + sumber)
     source = SOURCE_LABELS.get((track.source or "").lower(), (track.source or "Unknown").title())
     status = "🟡 Dijeda" if player.paused else "🟢 Sedang Diputar"
     embed = discord.Embed(
@@ -84,7 +90,6 @@ def build_now_playing(player: wavelink.Player) -> discord.Embed:
     )
     embed.set_author(name=f"{status} | 🟢 {source}")
 
-    # --- Description: artis + progress bar
     pos = min(player.position, track.length) if track.length else player.position
     total = "LIVE" if track.is_stream else fmt_clock(track.length)
     embed.description = (
@@ -92,7 +97,6 @@ def build_now_playing(player: wavelink.Player) -> discord.Embed:
         f"`{fmt_clock(pos)}` {progress_bar(pos, track.length)} `{total}`"
     )
 
-    # --- 3 inline fields
     embed.add_field(name="📑 Antrean", value=f"`{len(player.queue)} Lagu`")
     embed.add_field(name="🔁 Mode", value=f"`{LOOP_LABELS[player.queue.mode]}`")
     embed.add_field(
@@ -103,7 +107,6 @@ def build_now_playing(player: wavelink.Player) -> discord.Embed:
     if track.artwork:
         embed.set_thumbnail(url=track.artwork)
 
-    # --- Footer: peminta lagu + avatar
     requester_id = getattr(track.extras, "requester", None)
     member = player.guild.get_member(requester_id) if requester_id else None
     footer = f"Diminta oleh @{member.name if member else 'unknown'} • Wavelink v3 • Lavalink v4"
@@ -133,17 +136,13 @@ async def check_user_in_vc(interaction: discord.Interaction, player: wavelink.Pl
 
 # ------------------------------------------------------------------- views
 class NowPlayingView(discord.ui.View):
-    """Kontrol Now Playing: Row 0 = playback, Row 1 = mode & antrean.
-
-    Setiap tombol memanggil update_ui sehingga embed dan label tombol langsung diperbarui.
-    """
+    """Kontrol Now Playing: Row 0 = playback, Row 1 = mode & antrean."""
 
     def __init__(self, player: wavelink.Player | None = None) -> None:
         super().__init__(timeout=None)
         if player is not None:
             self.sync(player)
 
-    # ---- sinkronisasi tampilan tombol dengan state player
     def sync(self, player: wavelink.Player) -> None:
         if player.paused:
             self.btn_pause.label, self.btn_pause.emoji = "Resume", "▶️"
@@ -156,7 +155,6 @@ class NowPlayingView(discord.ui.View):
         self.btn_queue.label = f"Queue ({len(player.queue)})"
 
     async def update_ui(self, interaction: discord.Interaction, player: wavelink.Player) -> None:
-        """Perbarui embed + view pada pesan tempat tombol ditekan."""
         self.sync(player)
         await interaction.response.edit_message(embed=build_now_playing(player), view=self)
 
@@ -171,17 +169,15 @@ class NowPlayingView(discord.ui.View):
         else:
             await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    # ------------------------------------------------ Row 0: playback
     @discord.ui.button(emoji="⏮️", label="Prev", style=discord.ButtonStyle.secondary,
                        custom_id="music_btn_prev", row=0)
     async def btn_prev(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         player = get_player(interaction)
         prev = getattr(player, "prev_track", None)
-        # Jika lagu sudah berjalan >5 detik atau tidak ada riwayat -> ulang dari awal
         if player.current and (player.position > 5000 or prev is None):
             await player.seek(0)
         elif prev is not None:
-            if player.current:  # lagu sekarang dikembalikan ke depan antrean
+            if player.current:
                 player.queue.put_at(0, player.current)
             await player.play(prev)
         await self.update_ui(interaction, player)
@@ -212,7 +208,6 @@ class NowPlayingView(discord.ui.View):
         await interaction.response.edit_message(content="⏹️ Pemutaran dihentikan dan antrean dikosongkan.",
                                                 embed=None, view=None)
 
-    # ------------------------------------------------ Row 1: mode & antrean
     @discord.ui.button(emoji="🔀", label="Shuffle", style=discord.ButtonStyle.secondary,
                        custom_id="music_btn_shuffle", row=1)
     async def btn_shuffle(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -230,7 +225,7 @@ class NowPlayingView(discord.ui.View):
                        custom_id="music_btn_repeat", row=1)
     async def btn_repeat(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         player = get_player(interaction)
-        player.queue.mode = LOOP_CYCLE[player.queue.mode]  # Off -> Track -> Queue -> Off
+        player.queue.mode = LOOP_CYCLE[player.queue.mode]
         await self.update_ui(interaction, player)
 
     @discord.ui.button(emoji="📻", label="Autoplay: Off", style=discord.ButtonStyle.secondary,
@@ -331,6 +326,48 @@ class Music(commands.Cog):
         for t in self.alone_tasks.values():
             t.cancel()
 
+    # -------- Algoritma Filter Orisinil/Official
+    async def _search_track(self, query: str) -> list[wavelink.Playable] | wavelink.Playlist | None:
+        """Mencari audio orisinil resmi dan membuang versi remix/cover/edits."""
+        # 1. URL langsung
+        if query.startswith("http://") or query.startswith("https://"):
+            try:
+                res = await wavelink.Playable.search(query)
+                if res:
+                    return res
+            except Exception:
+                pass
+
+        query_lower = query.lower()
+
+        def pick_best_original(track_list: list[wavelink.Playable]) -> list[wavelink.Playable]:
+            # Cari track pertama yang judulnya tidak terindikasi file junk/modifikasi
+            for t in track_list:
+                t_title = t.title.lower()
+                is_clean = True
+                for junk in JUNK_KEYWORDS:
+                    if junk in t_title and junk not in query_lower:
+                        is_clean = False
+                        break
+                if is_clean:
+                    return [t]
+            return [track_list[0]]
+
+        # 2. Coba pencarian dengan hint Official lebih dahulu
+        search_candidates = [f"{query} Official", query]
+        for q in search_candidates:
+            try:
+                results = await wavelink.Playable.search(q, source=wavelink.TrackSource.SoundCloud)
+                if not results:
+                    continue
+                if isinstance(results, wavelink.Playlist):
+                    return results
+                return pick_best_original(results)
+            except Exception:
+                continue
+
+        return None
+
     # -------- wavelink events
     @commands.Cog.listener()
     async def on_wavelink_track_start(self, payload: wavelink.TrackStartEventPayload) -> None:
@@ -348,19 +385,18 @@ class Music(commands.Cog):
 
     @commands.Cog.listener()
     async def on_wavelink_track_end(self, payload: wavelink.TrackEndEventPayload) -> None:
-        """Simpan lagu yang baru selesai agar tombol Prev bisa memutarnya lagi."""
         player = payload.player
         if player is not None and payload.track is not None:
-            player.prev_track = payload.track  # type: ignore[attr-defined]
+            player.prev_track = payload.track
 
     @commands.Cog.listener()
     async def on_wavelink_track_exception(self, payload: wavelink.TrackExceptionEventPayload) -> None:
         player = payload.player
         channel = getattr(player, "text_channel", None) if player else None
         log.error("Track exception: %s", payload.exception)
-        if channel:
+        if channel and payload.track:
             await channel.send(embed=error_embed(
-                f"Gagal memutar **{payload.track.title}**: {payload.exception.get('message', 'unknown')}. "
+                f"Gagal memutar **{payload.track.title}**: audio tidak dapat diakses. "
                 "Lanjut ke lagu berikutnya."))
 
     @commands.Cog.listener()
@@ -418,7 +454,7 @@ class Music(commands.Cog):
             await self._clear_np(player.guild.id)
             await player.disconnect()
 
-    # -------- Spotify Embed HTML/JSON Parser (Bebas API Key & Tanpa 403)
+    # -------- Spotify Embed HTML/JSON Parser
     async def _scrape_spotify(self, url: str) -> list[str]:
         clean_url = url.split("?")[0]
         loop = asyncio.get_running_loop()
@@ -428,8 +464,6 @@ class Music(commands.Cog):
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
             }
             res = []
-            
-            # Format langsung ke halaman embed publik
             embed_url = clean_url.replace("open.spotify.com/", "open.spotify.com/embed/")
             try:
                 r = requests.get(embed_url, headers=headers, timeout=10)
@@ -439,7 +473,6 @@ class Music(commands.Cog):
             except Exception:
                 return res
 
-            # 1. Ekstrak dari JSON state __NEXT_DATA__
             match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', html)
             if match:
                 try:
@@ -456,7 +489,6 @@ class Music(commands.Cog):
                 except Exception:
                     pass
 
-            # 2. Regex fallback jika halaman embed memakai layout lightweight
             titles = re.findall(r'"title":\s*"([^"]+)",\s*"subtitle":\s*"([^"]+)"', html)
             for t_title, t_sub in titles:
                 if t_title not in ["Spotify", ""]:
@@ -471,8 +503,8 @@ class Music(commands.Cog):
             return []
 
     # -------- commands
-    @app_commands.command(name="play", description="Putar lagu dari judul atau URL (YouTube, SoundCloud, Spotify)")
-    @app_commands.describe(query="Judul lagu atau URL (YouTube, SoundCloud, Spotify)")
+    @app_commands.command(name="play", description="Putar lagu dari judul atau URL")
+    @app_commands.describe(query="Judul lagu atau URL (SoundCloud / Spotify)")
     @app_commands.guild_only()
     async def play(self, interaction: discord.Interaction, query: str) -> None:
         member = interaction.user
@@ -501,7 +533,7 @@ class Music(commands.Cog):
             return await interaction.followup.send(embed=error_embed(
                 f"Aku sedang dipakai di {player.channel.mention}."))
 
-        player.text_channel = interaction.channel  # type: ignore[attr-defined]
+        player.text_channel = interaction.channel
         clean_query = query.strip()
 
         # LINK SPOTIFY (Diputar instan + background queue loader)
@@ -511,15 +543,12 @@ class Music(commands.Cog):
                 return await interaction.followup.send(embed=error_embed("Gagal membaca link Spotify."))
 
             first_query = spotify_queries[0]
-            try:
-                res_first = await wavelink.Playable.search(first_query, source=wavelink.TrackSource.SoundCloud)
-            except Exception:
-                res_first = None
+            res_first = await self._search_track(first_query)
 
             if not res_first:
-                return await interaction.followup.send(embed=error_embed(f"Tidak dapat menemukan audio untuk `{first_query}` di SoundCloud."))
+                return await interaction.followup.send(embed=error_embed(f"Tidak dapat menemukan audio untuk `{first_query}`."))
 
-            first_track = res_first[0]
+            first_track = res_first[0] if isinstance(res_first, list) else res_first
             first_track.extras = {"requester": member.id}
 
             if not player.playing and not player.paused:
@@ -538,28 +567,25 @@ class Music(commands.Cog):
                 count = 1
                 for q in spotify_queries[1:]:
                     try:
-                        res = await wavelink.Playable.search(q, source=wavelink.TrackSource.SoundCloud)
+                        res = await self._search_track(q)
                         if res:
-                            t = res[0]
+                            t = res[0] if isinstance(res, list) else res
                             t.extras = {"requester": member.id}
                             player.queue.put(t)
                             count += 1
                     except Exception:
                         continue
                 try:
-                    await msg.edit(embed=info_embed(f"📚 Berhasil menambahkan **{count} lagu** dari Spotify ke antrean!"))
+                    await msg.edit(embed=info_embed(f"📚 Berhasil menambahkan **{count} lagu** ke antrean!"))
                 except Exception:
                     pass
 
             asyncio.create_task(load_remaining())
             return
 
-        # NON-SPOTIFY (Pencarian biasa / Link SoundCloud / Direct URL)
+        # PENCARIAN TEKS BIASA
         try:
-            if clean_query.startswith("http://") or clean_query.startswith("https://"):
-                tracks = await wavelink.Playable.search(clean_query)
-            else:
-                tracks = await wavelink.Playable.search(clean_query, source=wavelink.TrackSource.SoundCloud)
+            tracks = await self._search_track(clean_query)
         except wavelink.LavalinkLoadException as e:
             return await interaction.followup.send(embed=error_embed(f"Gagal memuat: `{e.error}`"))
         except Exception as e:
