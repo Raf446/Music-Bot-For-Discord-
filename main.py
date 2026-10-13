@@ -19,17 +19,23 @@ log = logging.getLogger("musicbot")
 TOKEN = os.getenv("DISCORD_TOKEN")
 LAVALINK_URI = os.getenv("LAVALINK_URI", "http://127.0.0.1:2333")
 LAVALINK_PASSWORD = os.getenv("LAVALINK_PASSWORD", "youshallnotpass")
-DEV_GUILD_ID = os.getenv("DEV_GUILD_ID")  # opsional: sync instan ke 1 server
+DEV_GUILD_ID = os.getenv("DEV_GUILD_ID")
 
 
 class MusicBot(commands.Bot):
     def __init__(self) -> None:
-        # Gunakan Intents.all() agar semua handshake voice dan gateway diterima penuh
-        intents = discord.Intents.all()
-        super().__init__(command_prefix=commands.when_mentioned, intents=intents)
+        # Gunakan default intents + voice_states agar gateway tidak crash akibat data race
+        intents = discord.Intents.default()
+        intents.voice_states = True
+        intents.guilds = True
+
+        super().__init__(
+            command_prefix=commands.when_mentioned,
+            intents=intents,
+        )
 
     async def setup_hook(self) -> None:
-        # 1) Hubungkan ke Lavalink
+        # 1) Hubungkan ke Lavalink Node
         node = wavelink.Node(
             uri=LAVALINK_URI,
             password=LAVALINK_PASSWORD,
@@ -67,4 +73,7 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        pass

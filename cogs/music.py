@@ -233,7 +233,7 @@ class NowPlayingView(discord.ui.View):
     async def btn_autoplay(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         player = get_player(interaction)
         if player.autoplay == wavelink.AutoPlayMode.enabled:
-            player.autoplay = wavelink.AutoPlayMode.partial
+            player.autoplay = wavelink.AutoPlayMode.disabled
         else:
             player.autoplay = wavelink.AutoPlayMode.enabled
         await self.update_ui(interaction, player)
@@ -264,7 +264,7 @@ class QueueView(discord.ui.View):
     def pages(self) -> int:
         return max(1, -(-len(self.player.queue) // PAGE_SIZE))
 
-    def _sync(self) -> None:
+    def _sync() -> None:
         self.page = min(self.page, self.pages - 1)
         self.prev.disabled = self.page <= 0
         self.next.disabled = self.page >= self.pages - 1
@@ -341,7 +341,6 @@ class Music(commands.Cog):
         query_lower = query.lower()
 
         def pick_best_original(track_list: list[wavelink.Playable]) -> list[wavelink.Playable]:
-            # Cari track pertama yang judulnya tidak terindikasi file junk/modifikasi
             for t in track_list:
                 t_title = t.title.lower()
                 is_clean = True
@@ -353,7 +352,6 @@ class Music(commands.Cog):
                     return [t]
             return [track_list[0]]
 
-        # 2. Coba pencarian dengan hint Official lebih dahulu
         search_candidates = [f"{query} Official", query]
         for q in search_candidates:
             try:
@@ -386,8 +384,23 @@ class Music(commands.Cog):
     @commands.Cog.listener()
     async def on_wavelink_track_end(self, payload: wavelink.TrackEndEventPayload) -> None:
         player = payload.player
-        if player is not None and payload.track is not None:
+        if player is None:
+            return
+
+        if payload.track is not None:
             player.prev_track = payload.track
+
+        # Jangan proses jika track diganti atau dihentikan manual
+        reason = getattr(payload, "reason", "")
+        if reason in ("REPLACED", "CLEANUP", "STOPPED"):
+            return
+
+        # Jika antrean masih ada, wavelink otomatis memutar lagu berikutnya
+        if not player.queue.is_empty:
+            next_track = player.queue.get()
+            await player.play(next_track)
+        else:
+            await self._clear_np(player.guild.id)
 
     @commands.Cog.listener()
     async def on_wavelink_track_exception(self, payload: wavelink.TrackExceptionEventPayload) -> None:
@@ -527,8 +540,9 @@ class Music(commands.Cog):
             except Exception as e:
                 log.exception("Gagal join VC")
                 return await interaction.followup.send(embed=error_embed(f"Gagal masuk voice channel: `{e}`"))
-            player.autoplay = wavelink.AutoPlayMode.partial
+            player.autoplay = wavelink.AutoPlayMode.disabled
             player.inactive_timeout = 300
+            await player.set_volume(50)
         elif player.channel != target_channel:
             return await interaction.followup.send(embed=error_embed(
                 f"Aku sedang dipakai di {player.channel.mention}."))
@@ -552,7 +566,7 @@ class Music(commands.Cog):
             first_track.extras = {"requester": member.id}
 
             if not player.playing and not player.paused:
-                await player.play(first_track, volume=player.volume if player.volume != 100 else 50)
+                await player.play(first_track)
             else:
                 player.queue.put(first_track)
 
@@ -600,15 +614,19 @@ class Music(commands.Cog):
                 t.extras = {"requester": member.id}
             added = player.queue.put(tracks)
             msg = f"📚 Menambahkan playlist **{tracks.name}** ({added} lagu)"
+            await interaction.followup.send(embed=info_embed(msg))
+            if not player.playing and not player.paused:
+                await player.play(player.queue.get())
         else:
             track = tracks[0] if isinstance(tracks, list) else tracks
             track.extras = {"requester": member.id}
-            player.queue.put(track)
             msg = f"✅ Ditambahkan: **[{track.title}]({track.uri})** — `{fmt_time(track.length)}`"
+            await interaction.followup.send(embed=info_embed(msg))
 
-        await interaction.followup.send(embed=info_embed(msg))
-        if not player.playing and not player.paused:
-            await player.play(player.queue.get(), volume=player.volume if player.volume != 100 else 50)
+            if not player.playing and not player.paused:
+                await player.play(track)
+            else:
+                player.queue.put(track)
 
     @app_commands.command(name="skip", description="Lewati lagu saat ini")
     @app_commands.guild_only()
